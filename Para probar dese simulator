@@ -1,0 +1,178 @@
+// Definiciones de pines para el Driver L298N
+const int ENA_PIN = 6;  // Pin PWM para Motor Derecho (Motor A en L298N)
+const int ENB_PIN = 5;  // Pin PWM para Motor Izquierdo (Motor B en L298N)
+const int IN1_PIN = 7;  // Control de dirección para Motor Derecho
+const int IN2_PIN = 8;  // Control de dirección para Motor Derecho
+const int IN3_PIN = 9;  // Control de dirección para Motor Izquierdo
+const int IN4_PIN = 10; // Control de dirección para Motor Izquierdo
+
+// Definiciones de pines para los Sensores TRCT5000
+// (Según tu descripción de hardware)
+const int SENSOR_DERECHO_PIN = 2;  // Sensor derecho físico del robot
+const int SENSOR_CENTRAL_PIN = 3;  // Sensor central físico del robot
+const int SENSOR_IZQUIERDO_PIN = 4; // Sensor izquierdo físico del robot
+
+// Constantes PID
+float Kp = 110.0;
+float Ki = 0.070;
+float Kd = 90.0;
+
+// Parámetros de velocidad
+const int BASE_SPEED = 230;            // Velocidad base para ambos motores
+const int MAX_MOTOR_PWM_SPEED = 255;   // Rango PWM es 0-255 para analogWrite
+
+// Variables PID
+float error = 0.0;
+float previousError = 0.0;
+float integral_sum = 0.0; // Renombrado de 'integral' para evitar conflictos
+float derivative = 0.0;
+
+// Límites para el término integral (Anti-windup)
+const float INTEGRAL_MIN = -200.0;
+const float INTEGRAL_MAX = 200.0;
+
+// --- Funciones Auxiliares ---
+
+// Función para emular Math.sign() de JavaScript
+template <typename T>
+int sign(T val) {
+    return (T(0) < val) - (val < T(0)); // Devuelve 1 para positivo, -1 para negativo, 0 para cero
+}
+
+// Función para controlar el motor izquierdo
+// speed: -255 (reversa máxima) a 255 (adelante máximo)
+void setLeftMotorSpeed(int speed) {
+    int actual_pwm_speed = abs(speed);
+    actual_pwm_speed = constrain(actual_pwm_speed, 0, MAX_MOTOR_PWM_SPEED); // Asegura 0-255
+
+    if (speed >= 0) { // Adelante o quieto
+        digitalWrite(IN3_PIN, HIGH); // Ajusta si la dirección es opuesta
+        digitalWrite(IN4_PIN, LOW);
+    } else { // Reversa
+        digitalWrite(IN3_PIN, LOW);
+        digitalWrite(IN4_PIN, HIGH);
+    }
+    analogWrite(ENB_PIN, actual_pwm_speed);
+}
+
+// Función para controlar el motor derecho
+// speed: -255 (reversa máxima) a 255 (adelante máximo)
+void setRightMotorSpeed(int speed) {
+    int actual_pwm_speed = abs(speed);
+    actual_pwm_speed = constrain(actual_pwm_speed, 0, MAX_MOTOR_PWM_SPEED); // Asegura 0-255
+
+    if (speed >= 0) { // Adelante o quieto
+        digitalWrite(IN1_PIN, HIGH); // Ajusta si la dirección es opuesta
+        digitalWrite(IN2_PIN, LOW);
+    } else { // Reversa
+        digitalWrite(IN1_PIN, LOW);
+        digitalWrite(IN2_PIN, HIGH);
+    }
+    analogWrite(ENA_PIN, actual_pwm_speed);
+}
+
+void setup() {
+    Serial.begin(9600);
+
+    // Configurar pines de sensores como ENTRADA
+    pinMode(SENSOR_IZQUIERDO_PIN, INPUT);
+    pinMode(SENSOR_CENTRAL_PIN, INPUT);
+    pinMode(SENSOR_DERECHO_PIN, INPUT);
+
+    // Configurar pines del L298N como SALIDA
+    pinMode(ENA_PIN, OUTPUT);
+    pinMode(ENB_PIN, OUTPUT);
+    pinMode(IN1_PIN, OUTPUT);
+    pinMode(IN2_PIN, OUTPUT);
+    pinMode(IN3_PIN, OUTPUT);
+    pinMode(IN4_PIN, OUTPUT);
+
+    // Opcional: Detener motores al inicio
+    setLeftMotorSpeed(0);
+    setRightMotorSpeed(0);
+
+    Serial.println("Robot Sigue Lineas Arduino - Setup Completo.");
+}
+
+void loop() {
+    // Lectura de los sensores físicos del robot
+    // Se asume: 0 = en línea, 1 = fuera de línea
+    int sL = digitalRead(SENSOR_IZQUIERDO_PIN);  // Lectura del sensor izquierdo real
+    int sC = digitalRead(SENSOR_CENTRAL_PIN);    // Lectura del sensor central real
+    int sR = digitalRead(SENSOR_DERECHO_PIN);    // Lectura del sensor derecho real
+
+    // --- Cálculo del error (lógica del simulador) ---
+    if (sL == 1 && sC == 1 && sR == 1) { 
+        // Todos los sensores fuera de la línea (línea perdida)
+        // Usando * 3.0 como en tu último código de simulación.
+        // Nota: sign(0) * 3.0 será 0.0. Si previousError es 0, el error será 0.
+        // Esto significa que el robot intentará seguir recto si estaba centrado y pierde la línea.
+        // Considera una estrategia alternativa si este no es el comportamiento deseado:
+        // if (previousError == 0.0) { error = 3.0; /* o -3.0, para girar a un lado por defecto */ }
+        // else { error = sign(previousError) * 3.0; }
+        error = sign(previousError) * 3.0f; // 'f' para indicar float
+    } else if (sL == 0 && sC == 0 && sR == 0) { 
+        // Todos los sensores en la línea (cruce o línea ancha)
+        error = 0.0f;
+    } else if (sL == 0 && sC == 1 && sR == 1) { 
+        // Robot muy a la derecha (línea a la izquierda) -> error negativo para girar izquierda
+        error = -2.0f; 
+    } else if (sL == 0 && sC == 0 && sR == 1) { 
+        // Robot medio a la derecha
+        error = -1.0f; 
+    } else if (sL == 1 && sC == 0 && sR == 1) { 
+        // Robot centrado
+        error = 0.0f;  
+    } else if (sL == 1 && sC == 0 && sR == 0) { 
+        // Robot medio a la izquierda (línea a la derecha) -> error positivo para girar derecha
+        error = 1.0f;  
+    } else if (sL == 1 && sC == 1 && sR == 0) { 
+        // Robot muy a la izquierda
+        error = 2.0f;  
+    }
+    // Para cualquier otra combinación no listada, 'error' mantendrá su valor anterior.
+
+    // Cálculo PID
+    integral_sum = integral_sum + error;
+    integral_sum = constrain(integral_sum, INTEGRAL_MIN, INTEGRAL_MAX); // Limitar integral (anti-windup)
+    
+    derivative = error - previousError;
+    
+    float pidOutput = (Kp * error) + (Ki * integral_sum) + (Kd * derivative);
+    
+    previousError = error; // Guardar error actual para la siguiente iteración
+
+    // Calcular velocidad objetivo para cada motor
+    float calculated_left_speed = BASE_SPEED + pidOutput;
+    float calculated_right_speed = BASE_SPEED - pidOutput;
+
+    // Limitar las velocidades calculadas al rango conceptual de -255 a 255
+    // (las funciones setMotorSpeed manejarán el abs() y la dirección)
+    float constrained_left_speed = constrain(calculated_left_speed, (float)-MAX_MOTOR_PWM_SPEED, (float)MAX_MOTOR_PWM_SPEED);
+    float constrained_right_speed = constrain(calculated_right_speed, (float)-MAX_MOTOR_PWM_SPEED, (float)MAX_MOTOR_PWM_SPEED);
+
+    // Convertir a entero para los comandos del motor
+    int leftMotorCommand = round(constrained_left_speed);
+    int rightMotorCommand = round(constrained_right_speed);
+
+    // Aplicar velocidades a los motores
+    setLeftMotorSpeed(leftMotorCommand);
+    setRightMotorSpeed(rightMotorCommand);
+
+    // Descomenta las siguientes líneas para depuración vía Monitor Serie:
+    /*
+    Serial.print("sL:"); Serial.print(sL);
+    Serial.print(" sC:"); Serial.print(sC);
+    Serial.print(" sR:"); Serial.print(sR);
+    Serial.print(" | E:"); Serial.print(error, 1); // Imprime con 1 decimal
+    // Serial.print(" PrevE:"); Serial.print(previousError, 1);
+    Serial.print(" P:"); Serial.print(Kp * error, 1);
+    Serial.print(" I:"); Serial.print(Ki * integral_sum, 1);
+    Serial.print(" D:"); Serial.print(Kd * derivative, 1);
+    // Serial.print(" PIDOut:"); Serial.print(pidOutput, 1);
+    Serial.print(" | LCmd:"); Serial.print(leftMotorCommand);
+    Serial.print(" RCmd:"); Serial.println(rightMotorCommand);
+    */
+    
+    delay(5); // Pequeña pausa, igual que en la simulación
+}
