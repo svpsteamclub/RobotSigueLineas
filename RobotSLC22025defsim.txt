@@ -1,0 +1,135 @@
+// Definición de pines (como se usa en el simulador)
+const LEFT_SENSOR_PIN = 2;   // Digital (Conectado al sensor izquierdo del robot)
+const CENTER_SENSOR_PIN = 3; // Digital (Conectado al sensor central del robot)
+const RIGHT_SENSOR_PIN = 4;  // Digital (Conectado al sensor derecho del robot)
+const FAR_LEFT_SENSOR_PIN = 5; // No se usa en esta lógica
+const FAR_RIGHT_SENSOR_PIN = 6; // No se usa en esta lógica
+
+const MOTOR_LEFT_PWM = 10;   // analogWrite para velocidad del motor izquierdo
+const MOTOR_RIGHT_PWM = 9;  // analogWrite para velocidad del motor derecho
+
+////// Declara variables aqui //////
+
+// === Valores para control PID (Ajusta estos valores) ===
+const baseSpeed = 200; // Velocidad base del robot (0-255)
+const Kp = 60.0;       // Constante Proporcional: Corrige el error actual.
+const Ki = 0.75;       // Constante Integral: Elimina el error acumulado.
+const Kd = 5.0;       // Constante Derivativa: Previene oscilaciones.
+
+// === Variables Internas del PID (No modificar) ===
+let errorPID = 0;
+let previousErrorPID = 0;
+let integralAccumulator = 0;
+const integralMax = 200.0; // Límite para el acumulador integral
+
+// Memoria para cuando se pierde la línea
+const POS_MEM = {
+    NONE: 0,
+    LEFT_OF_LINE: 1,  // El robot estaba a la izquierda de la línea
+    RIGHT_OF_LINE: 2  // El robot estaba a la derecha de la línea
+};
+let lastKnownLinePosition = POS_MEM.NONE;
+
+// Tiempo para cálculos (delta time)
+const deltaTime_s = 0.01; // Basado en el delay(10) al final del loop
+
+////////////////// Setup y Loop ////////////////////
+
+function setup() {
+    Serial.begin(9600);
+    pinMode(LEFT_SENSOR_PIN, INPUT);
+    pinMode(CENTER_SENSOR_PIN, INPUT);
+    pinMode(RIGHT_SENSOR_PIN, INPUT);
+    // Los pines FAR_LEFT y FAR_RIGHT no se usan en esta lógica
+    // pinMode(FAR_LEFT_SENSOR_PIN, INPUT);
+    // pinMode(FAR_RIGHT_SENSOR_PIN, INPUT);
+    pinMode(MOTOR_LEFT_PWM, OUTPUT);
+    pinMode(MOTOR_RIGHT_PWM, OUTPUT);
+    Serial.println("Robot Setup Complete. PID Control.");
+}
+
+async function loop() {
+    // Lectura de sensores: 0 = en línea, 1 = fuera de línea
+    // La lógica original era HIGH (1) = línea. Invertimos la lectura para que coincida.
+    // 1 = línea detectada, 0 = fuera de línea
+    let sL = !digitalRead(LEFT_SENSOR_PIN);
+    let sC = !digitalRead(CENTER_SENSOR_PIN);
+    let sR = !digitalRead(RIGHT_SENSOR_PIN);
+
+    // --- 1. Cálculo del Error PID ---
+    // El error es positivo si la línea está a la derecha del robot.
+    // El error es negativo si la línea está a la izquierda del robot.
+
+    if (!sL && !sC && !sR) { // Caso 000: Línea perdida
+        if (lastKnownLinePosition === POS_MEM.LEFT_OF_LINE) {
+            errorPID = -4.0; // Gira bruscamente a la izquierda
+        } else if (lastKnownLinePosition === POS_MEM.RIGHT_OF_LINE) {
+            errorPID = 4.0;  // Gira bruscamente a la derecha
+        } else {
+            errorPID = 4.0;  // Por defecto, gira a la derecha si no hay memoria
+        }
+    } else if (!sL && sC && !sR) { // Caso 010: Centrado
+        errorPID = 0.0;
+        lastKnownLinePosition = POS_MEM.NONE;
+    } else if (sL && sC && !sR) { // Caso 110: Línea un poco a la izquierda
+        errorPID = -0.5;
+        lastKnownLinePosition = POS_MEM.LEFT_OF_LINE;
+    } else if (sL && !sC && !sR) { // Caso 100: Línea a la izquierda
+        errorPID = -2.0;
+        lastKnownLinePosition = POS_MEM.LEFT_OF_LINE;
+    } else if (!sL && sC && sR) { // Caso 011: Línea un poco a la derecha
+        errorPID = 0.5;
+        lastKnownLinePosition = POS_MEM.RIGHT_OF_LINE;
+    } else if (!sL && !sC && sR) { // Caso 001: Línea a la derecha
+        errorPID = 2.0;
+        lastKnownLinePosition = POS_MEM.RIGHT_OF_LINE;
+    } else if (sL && sC && sR) { // Caso 111: Intersección o línea ancha, seguir recto
+        errorPID = 0.0;
+        lastKnownLinePosition = POS_MEM.NONE;
+    } else if (sL && !sC && sR) { // Caso 101: Raro, mantener error previo
+        errorPID = previousErrorPID;
+    }
+
+    // --- 2. Cálculo de Términos PID ---
+    const proportionalTerm = Kp * errorPID;
+
+    integralAccumulator += errorPID * deltaTime_s;
+    integralAccumulator = constrain(integralAccumulator, -integralMax, integralMax); // Limitar
+    const integralTerm = Ki * integralAccumulator;
+
+    const derivativeTerm = Kd * (errorPID - previousErrorPID) / deltaTime_s;
+    
+    previousErrorPID = errorPID;
+
+    const pidAdjustment = proportionalTerm + integralTerm + derivativeTerm;
+
+    // --- 3. Cálculo y Aplicación de Velocidad a Motores ---
+    // Si pidAdjustment es positivo, el robot debe girar a la derecha (motor izquierdo más rápido)
+    // Si pidAdjustment es negativo, el robot debe girar a la izquierda (motor derecho más rápido)
+    let speedLeft = baseSpeed - pidAdjustment;
+    let speedRight = baseSpeed + pidAdjustment;
+
+    // Restringir los valores de velocidad entre 0 y 255
+    speedLeft = constrain(speedLeft, -155, 255);
+    speedRight = constrain(speedRight, -155, 255);
+
+    // Aplicar velocidad a los motores
+    analogWrite(MOTOR_LEFT_PWM, speedLeft);
+    analogWrite(MOTOR_RIGHT_PWM, speedRight);
+    
+    // Imprimir datos para depuración (opcional)
+    //Serial.print("Error: "); Serial.print(errorPID.toFixed(2));
+    //Serial.print("\tAdj: "); Serial.print(pidAdjustment.toFixed(2));
+    //Serial.print("\tL_PWM: "); Serial.print(Math.round(speedLeft));
+    //Serial.print("\tR_PWM: "); Serial.println(Math.round(speedRight));
+
+    await delay(10); // Pequeña pausa para estabilizar el ciclo
+}
+
+////////////////// Fin de Setup y Loop ////////////////////
+
+////// No Borrar esta función, es necesaria para limitar valores //////
+
+function constrain(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
